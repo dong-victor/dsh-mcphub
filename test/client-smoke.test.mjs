@@ -30,7 +30,9 @@ const html = `<!doctype html><html lang="zh"><head></head><body>
       <div class="regionArea-abc"></div>
       <div class="footArea-abc">
         <div class="settingsArea-abc">
-          <button class="trigger-abc">设置</button>
+          <div data-slot="sidebar.settings" style="display: contents;">
+            <button class="trigger-abc">设置</button>
+          </div>
         </div>
       </div>
     </div>
@@ -116,10 +118,11 @@ await new Promise((resolve) => setTimeout(resolve, 60))
 const entry = document.querySelector('[data-dsh-mcphub-entry]')
 const settingsArea = document.querySelector('[class*="settingsArea"]')
 const trigger = settingsArea?.querySelector('button[class*="trigger"]')
+const triggerParent = trigger?.parentElement // the data-slot wrapper (display:contents)
 check('sidebar entry mounted', entry !== null)
-check('entry placed inside the settings area (above settings)', entry?.parentElement === settingsArea, entry?.parentElement?.className)
+check('entry placed inside the settings area slot (above settings)', entry?.parentElement === triggerParent, entry?.parentElement?.className)
 check('entry sits directly above the settings trigger', trigger !== undefined && trigger?.previousElementSibling === entry)
-check('entry not in the top plugin family area', !entry?.parentElement?.querySelector('[class*="regionArea"]'))
+check('entry lives under the settings area', triggerParent !== undefined && settingsArea?.contains(entry))
 check('locale registered under dsh-mcphub', registeredLocales.ns === 'dsh-mcphub')
 check('zh dict has entry.label', registeredLocales.zh?.['entry.label'] === 'MCPHub')
 check('entry label text rendered (zh)', entry?.querySelector('.mh-entryLabel')?.textContent === 'MCPHub')
@@ -132,12 +135,20 @@ check('entry fetch uses plain status path (host cache)', fetchCalls.length > 0 &
 
 // --- rail (collapsed) mode ----------------------------------------------------------
 check('wide mode: entry has no data-rail', !entry?.hasAttribute('data-rail'))
-trigger?.classList.add('trigger-rail-abc')
+// CSS-module style: "_rail" suffix (underscore is a word char, \brail\b would miss it)
+if (trigger) trigger.className = 'VOzbGW_trigger VOzbGW_rail'
 await new Promise((resolve) => setTimeout(resolve, 60))
-check('rail mode: entry switches to data-rail', entry?.hasAttribute('data-rail'))
-trigger?.classList.remove('trigger-rail-abc')
+check('rail mode (css-module class): entry switches to data-rail', entry?.hasAttribute('data-rail'))
+if (trigger) trigger.className = 'trigger-abc'
 await new Promise((resolve) => setTimeout(resolve, 60))
 check('wide mode restored: data-rail removed', !entry?.hasAttribute('data-rail'))
+// hyphenated style
+trigger?.classList.add('trigger-rail-abc')
+await new Promise((resolve) => setTimeout(resolve, 60))
+check('rail mode (hyphen class): entry switches to data-rail', entry?.hasAttribute('data-rail'))
+trigger?.classList.remove('trigger-rail-abc')
+await new Promise((resolve) => setTimeout(resolve, 60))
+check('wide mode restored again', !entry?.hasAttribute('data-rail'))
 
 // --- open panel -----------------------------------------------------------------
 entry.click()
