@@ -24,7 +24,17 @@ function check(name, condition, detail) {
 }
 
 const html = `<!doctype html><html lang="zh"><head></head><body>
-  <div data-pane="sidebar"><div class="logoRow"><button class="newSession">New Session</button></div><div class="sidebarCol-inner"></div></div>
+  <div data-pane="sidebar">
+    <div class="root-abc">
+      <div class="logoRow-abc"><button class="newSession-abc">New Session</button></div>
+      <div class="regionArea-abc"></div>
+      <div class="footArea-abc">
+        <div class="settingsArea-abc">
+          <button class="trigger-abc">设置</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <div data-pane="conversation"><div class="chat">conversation</div></div>
 </body></html>`
 
@@ -104,19 +114,30 @@ await new Promise((resolve) => setTimeout(resolve, 60))
 
 // --- sidebar entry ------------------------------------------------------------
 const entry = document.querySelector('[data-dsh-mcphub-entry]')
+const settingsArea = document.querySelector('[class*="settingsArea"]')
+const trigger = settingsArea?.querySelector('button[class*="trigger"]')
 check('sidebar entry mounted', entry !== null)
-check('entry placed inside sidebar root', entry?.parentElement?.getAttribute('data-pane') === 'sidebar')
+check('entry placed inside the settings area (above settings)', entry?.parentElement === settingsArea, entry?.parentElement?.className)
+check('entry sits directly above the settings trigger', trigger !== undefined && trigger?.previousElementSibling === entry)
+check('entry not in the top plugin family area', !entry?.parentElement?.querySelector('[class*="regionArea"]'))
 check('locale registered under dsh-mcphub', registeredLocales.ns === 'dsh-mcphub')
 check('zh dict has entry.label', registeredLocales.zh?.['entry.label'] === 'MCPHub')
 check('entry label text rendered (zh)', entry?.querySelector('.mh-entryLabel')?.textContent === 'MCPHub')
 
 // --- sidebar inline summary (no click needed) -------------------------------------
-const toolsStat = entry?.querySelector('[data-stat="tools"]')?.textContent ?? ''
-const serversStat = entry?.querySelector('[data-stat="servers"]')?.textContent ?? ''
-check('entry tool count rendered', toolsStat === '3 个工具', toolsStat)
-check('entry server count rendered', serversStat === '2 个 server', serversStat)
+const entryCount = entry?.querySelector('.mh-entryCount')?.textContent ?? ''
+check('entry tool count rendered', entryCount === '3', entryCount)
 check('connection dot is ok', entry?.querySelector('.mh-dot')?.classList.contains('ok'))
 check('entry fetch uses plain status path (host cache)', fetchCalls.length > 0 && fetchCalls[0] === '/api/dsh-mcphub/status')
+
+// --- rail (collapsed) mode ----------------------------------------------------------
+check('wide mode: entry has no data-rail', !entry?.hasAttribute('data-rail'))
+trigger?.classList.add('trigger-rail-abc')
+await new Promise((resolve) => setTimeout(resolve, 60))
+check('rail mode: entry switches to data-rail', entry?.hasAttribute('data-rail'))
+trigger?.classList.remove('trigger-rail-abc')
+await new Promise((resolve) => setTimeout(resolve, 60))
+check('wide mode restored: data-rail removed', !entry?.hasAttribute('data-rail'))
 
 // --- open panel -----------------------------------------------------------------
 entry.click()

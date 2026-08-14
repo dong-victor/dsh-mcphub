@@ -17,7 +17,7 @@ mcp__mcphub__<server名>-<工具名>
 - **agent 工具**：
   - `mcphub_status` —— 连接状态、端点、server / 工具清单（含 DSH 可调用名）、MCPHub `/health`；
   - `mcphub_resync` —— 强制重新同步工具集（MCPHub 侧增删改 server / 工具后使用）。
-- **侧边栏「MCPHub」入口**：连接状态点 + 工具数 / server 数概览，点击打开状态面板。
+- **侧边栏「MCPHub」入口**：位于侧边栏**底部「设置」按钮上方**（连接状态点 + 工具数概览；折叠侧边栏时自动切换为图标形态），点击打开状态面板。
 - **状态面板**：连接徽章、端点 / 分组 / 健康 / 上次同步 / 最近错误、按 server 分组的工具清单（可展开）、「打开 MCPHub Dashboard」外链、手动刷新。
 - **健壮性**：断线自动指数退避重连（工具在中断期保持注册、调用报错，恢复后自动重同步）；监听 `notifications/tools/list_changed` 热同步工具集；MCPHub 不可达时插件照常激活，状态面板如实显示。
 - **宿主路由**：`GET /api/dsh-mcphub/status`（环回地址保护、TTL 缓存、`?refresh=1` 绕过）。
