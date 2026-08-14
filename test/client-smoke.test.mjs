@@ -37,7 +37,9 @@ const html = `<!doctype html><html lang="zh"><head></head><body>
       </div>
     </div>
   </div>
-  <div data-pane="conversation"><div class="chat">conversation</div></div>
+  <div class="centerCol-abc">
+    <div data-slot="conversation" style="display: contents;"><div class="chat">conversation</div></div>
+  </div>
 </body></html>`
 
 const dom = new JSDOM(html, { url: 'http://127.0.0.1:3080/', runScripts: 'outside-only', pretendToBeVisual: true })
@@ -155,7 +157,8 @@ entry.click()
 await new Promise((resolve) => setTimeout(resolve, 80))
 
 const view = document.querySelector('[data-dsh-mcphub-view]')
-check('panel view mounted in conversation column', view !== null && view.parentElement?.getAttribute('data-pane') === 'conversation')
+check('panel view mounted in the center column', view !== null && view?.parentElement?.matches('[class*="centerCol"]'), view?.parentElement?.className)
+check('panel view sits after the conversation slot', view !== null && view?.parentElement?.querySelector('[data-slot="conversation"]') !== null)
 check('html carries data-dsh-mcphub-active', document.documentElement.hasAttribute('data-dsh-mcphub-active'))
 
 const stateBadge = document.querySelector('.mh-stateBadge')
