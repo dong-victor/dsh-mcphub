@@ -1,0 +1,59 @@
+{
+  "name": "@dong-victor/dsh-mcphub",
+  "description": "MCPHub 桥接插件（DSH Web GUI）：把本地 MCPHub（http://localhost:3000，@samanhappy/mcphub）聚合暴露的全部 MCP server 工具桥接进 DSH。宿主侧以 MCP Streamable HTTP 客户端连接 MCPHub 聚合端点 /mcp（或 /mcp/<group> 分组端点），把发现到的工具以 mcp__mcphub__<server>-<tool> 形式注册为 agent 原生工具；提供 mcphub_status / mcphub_resync 两个 agent 工具，/api/dsh-mcphub/status 环回路由与侧边栏「MCPHub」面板（连接状态、server/工具清单、一键打开 MCPHub Dashboard）。断线自动指数退避重连、工具集热同步（tools/list_changed），无需改 dsh 源码。",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "platform": "web"
+    }
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "jsdom": "^30.0.1"
+  },
+  "scripts": {
+    "test": "node test/host-boot.test.mjs && node test/client-smoke.test.mjs && node test/bridge-live.test.mjs",
+    "pack": "npm pack"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "mcphub",
+    "mcp",
+    "model context protocol",
+    "hub"
+  ],
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT"
+}
