@@ -29,6 +29,9 @@ const html = `<!doctype html><html lang="zh"><head></head><body>
       <div class="logoRow-abc"><button class="newSession-abc">New Session</button></div>
       <div class="regionArea-abc"></div>
       <div class="footArea-abc">
+        <div class="footerActions-abc">
+          <div data-slot="sidebar.footer.action" style="display: contents;"><button class="railEntry-abc">plugins</button></div>
+        </div>
         <div class="settingsArea-abc">
           <div data-slot="sidebar.settings" style="display: contents;">
             <button class="trigger-abc">设置</button>
@@ -118,13 +121,14 @@ await new Promise((resolve) => setTimeout(resolve, 60))
 
 // --- sidebar entry ------------------------------------------------------------
 const entry = document.querySelector('[data-dsh-mcphub-entry]')
+const footArea = document.querySelector('[class*="footArea"]')
 const settingsArea = document.querySelector('[class*="settingsArea"]')
 const trigger = settingsArea?.querySelector('button[class*="trigger"]')
-const triggerParent = trigger?.parentElement // the data-slot wrapper (display:contents)
 check('sidebar entry mounted', entry !== null)
-check('entry placed inside the settings area slot (above settings)', entry?.parentElement === triggerParent, entry?.parentElement?.className)
-check('entry sits directly above the settings trigger', trigger !== undefined && trigger?.previousElementSibling === entry)
-check('entry lives under the settings area', triggerParent !== undefined && settingsArea?.contains(entry))
+check('entry is a direct child of the foot area', entry?.parentElement === footArea, entry?.parentElement?.className)
+check('entry sits directly above the settings area', settingsArea?.previousElementSibling === entry)
+check('entry stays out of the settings area', settingsArea?.contains(entry) === false)
+check('entry keeps footer actions above it', footArea?.children[0]?.className === 'footerActions-abc')
 check('locale registered under dsh-mcphub', registeredLocales.ns === 'dsh-mcphub')
 check('zh dict has entry.label', registeredLocales.zh?.['entry.label'] === 'MCPHub')
 check('entry label text rendered (zh)', entry?.querySelector('.mh-entryLabel')?.textContent === 'MCPHub')
@@ -204,6 +208,30 @@ check('dispose removes sidebar entry', document.querySelector('[data-dsh-mcphub-
 check('dispose removes panel view', document.querySelector('[data-dsh-mcphub-view]') === null)
 check('dispose removes active attr', !document.documentElement.hasAttribute('data-dsh-mcphub-active'))
 check('dispose removes injected style', document.getElementById('dsh-mcphub-style') === null)
+
+// --- legacy shell (no footArea): fall back into the settings area --------------
+const legacyDom = new JSDOM(`<!doctype html><html lang="zh"><body>
+  <div data-pane="sidebar"><div class="root-abc">
+    <div class="logoRow-abc"><button class="newSession-abc">New Session</button></div>
+    <div class="settingsArea-abc"><div data-slot="sidebar.settings" style="display: contents;">
+      <button class="trigger-abc">设置</button></div></div>
+  </div></div>
+  <div class="centerCol-abc"></div>
+</body></html>`, { url: 'http://127.0.0.1:3080/', runScripts: 'outside-only', pretendToBeVisual: true })
+legacyDom.window.fetch = async () => ({ ok: true, json: async () => fakeStatus })
+let legacyRegistered
+legacyDom.window.__ModuleLoader__ = { load: (handoff) => { legacyRegistered = handoff } }
+legacyDom.window.eval(source)
+legacyRegistered.factory(() => { throw new Error('unexpected require') }).apply({
+  locale: { register: () => () => {} },
+  effect: (fn) => { fn(); return () => {} },
+})
+await new Promise((resolve) => setTimeout(resolve, 60))
+const legacyDoc = legacyDom.window.document
+const legacyEntry = legacyDoc.querySelector('[data-dsh-mcphub-entry]')
+const legacyTrigger = legacyDoc.querySelector('button[class*="trigger"]')
+check('legacy shell: entry falls back above the settings trigger', legacyEntry !== null && legacyTrigger?.previousElementSibling === legacyEntry, legacyEntry?.parentElement?.className)
+legacyDom.window.close()
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`)
 process.exit(failures === 0 ? 0 : 1)
