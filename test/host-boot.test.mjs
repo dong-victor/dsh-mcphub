@@ -7,7 +7,8 @@
  *
  * Usage: node test/host-boot.test.mjs
  */
-import { apply, MCPHUB_GUIDANCE, publicToolName, groupToolsByServer, endpointOf } from '../lib/index.js'
+import { apply, MCPHUB_GUIDANCE_BASE, MCPHUB_GUIDANCE_PROACTIVE, buildGuidance, publicToolName, groupToolsByServer, endpointOf } from '../lib/index.js'
+import { valueSchemaSpecToJsonSchema } from '@deepseek-ai/dsh-tools'
 
 let failures = 0
 function check(name, condition, detail) {
@@ -65,7 +66,41 @@ check('mcphub_resync tool registered', toolNames.includes('mcphub_resync'))
 check('two agent tools registered', registered.tools.length === 2)
 
 const statusTool = registered.tools.find((t) => t.name === 'mcphub_status')
-check('status tool has output schema', statusTool?.output?.schema?.type === 'object' && statusTool.output.schema.properties?.servers !== undefined)
+check('status tool compiled an object output schema',
+  statusTool?.output?.schema?.type === 'object' && statusTool.output.schema.properties?.servers !== undefined)
+
+// The registry compiles `output.schema` through the 0.2.0-rc.2 value-schema
+// DSL; a raw-JSON-Schema regression would throw at register time. Assert the
+// compiled projection carries the requiredness the DSL annotation produced.
+const compiledRequired = statusTool?.output?.schema?.required
+check('compiled output schema marks ok/connected required',
+  Array.isArray(compiledRequired) && compiledRequired.includes('ok') && compiledRequired.includes('connected'),
+  JSON.stringify(compiledRequired))
+check('compiled output schema is closed',
+  statusTool?.output?.schema?.additionalProperties === false)
+
+// The bridge's per-tool output schema is built by the same DSL; compile the
+// exact declaration the bridge emits so a raw-schema regression fails here.
+const bridgeOutputSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    content: { type: 'array', items: { type: 'json' }, required: true },
+    structuredContent: { type: 'json' },
+  },
+}
+let bridgeSchemaError
+let bridgeCompiled
+try {
+  bridgeCompiled = valueSchemaSpecToJsonSchema(bridgeOutputSchema)
+} catch (error) {
+  bridgeSchemaError = error
+}
+check('bridge tool output schema is valid in the 0.2.0-rc.2 DSL', bridgeSchemaError === undefined, bridgeSchemaError?.message)
+check('bridge output schema requires content',
+  Array.isArray(bridgeCompiled?.required) && bridgeCompiled.required.includes('content'),
+  JSON.stringify(bridgeCompiled?.required))
+
 const renderBlocks = statusTool?.output?.render?.(
   {},
   {
@@ -85,7 +120,22 @@ const renderBlocks = statusTool?.output?.render?.(
 check('status render produces a text block', Array.isArray(renderBlocks) && typeof renderBlocks[0]?.text === 'string' && renderBlocks[0].text.includes('mcp__mcphub__demo-q'))
 
 check('prompt section registered', registered.sections.length === 1 && registered.sections[0].name === 'plugin:dsh-mcphub')
-check('prompt guidance mentions tools naming', typeof MCPHUB_GUIDANCE === 'string' && MCPHUB_GUIDANCE.includes('mcp__mcphub__'))
+check('prompt guidance mentions tools naming',
+  typeof MCPHUB_GUIDANCE_BASE === 'string' && MCPHUB_GUIDANCE_BASE.includes('mcp__mcphub__'))
+
+// buildGuidance is the section's live text function: it must render a
+// disconnected notice without a bridge and a tool list once tools exist.
+const emptyGuidance = buildGuidance(undefined)
+check('guidance renders disconnected notice without a bridge', emptyGuidance.includes('未连接'), emptyGuidance.slice(0, 120))
+const fakeBridge = {
+  serverName: 'mcphub',
+  tools: new Map([['mcp__mcphub__demo-q', { publicName: 'mcp__mcphub__demo-q', description: 'query' }]]),
+  servers: [{ server: 'demo', tools: ['demo-q'] }],
+}
+const liveGuidance = buildGuidance(fakeBridge)
+check('guidance lists discovered tools with a bridge',
+  liveGuidance.includes('mcp__mcphub__demo-q') && liveGuidance.includes('demo（1 个工具）'))
+check('guidance carries the proactive routing directive', MCPHUB_GUIDANCE_PROACTIVE.includes('主动调用规则'))
 
 // Pure helpers.
 check('publicToolName clean case', publicToolName('mcphub', 'demo-q') === 'mcp__mcphub__demo-q')

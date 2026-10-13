@@ -17,19 +17,14 @@ mcp__mcphub__<server名>-<工具名>
 - **agent 工具**：
   - `mcphub_status` —— 连接状态、端点、server / 工具清单（含 DSH 可调用名）、MCPHub `/health`；
   - `mcphub_resync` —— 强制重新同步工具集（MCPHub 侧增删改 server / 工具后使用）。
-- **侧边栏「MCPHub」入口**：作为侧边栏底部 **foot 区域（`footArea`）的直接子节点**，插在设置区域（`settingsArea`，即「设置」按钮）上方；`footArea` 不存在的老宿主自动回退为「设置在 settingsArea 内、trigger 上方」（连接状态点 + 工具数概览；折叠侧边栏时自动切换为图标形态），点击打开状态面板。
-- **状态面板**：连接徽章、端点 / 分组 / 健康 / 上次同步 / 最近错误、按 server 分组的工具清单（可展开）、「打开 MCPHub Dashboard」外链、手动刷新。
+- **侧边栏「MCPHub」入口**：注册到侧边栏底部 `sidebar.footer.action` 槽位（list 类型，位于设置行上方），整行形态显示 图标 + 「MCPHub」+ **当前桥接工具数徽章**（未连接时显示 `--`）；折叠为轨道时自动切换成图标 + 连接状态点。点击在状态面板与对话之间切换。
+- **状态面板**：作为 `main` 槽位（keyed，key = `mcphub`）的占位组件挂载，经 `ctx.layout.selectPanel('mcphub')` 选中；包含连接徽章、端点 / 分组 / 健康 / 上次同步 / 最近错误、按 server 分组的工具清单（可展开）、「打开 MCPHub Dashboard」外链、手动刷新。
 - **健壮性**：断线自动指数退避重连（工具在中断期保持注册、调用报错，恢复后自动重同步）；监听 `notifications/tools/list_changed` 热同步工具集；MCPHub 不可达时插件照常激活，状态面板如实显示。
 - **宿主路由**：`GET /api/dsh-mcphub/status`（环回地址保护、TTL 缓存、`?refresh=1` 绕过）。
 
 ## 安装
 
 前置：本机已运行 MCPHub（`mcphub`，`http://localhost:3000`），且其中已启用至少一个 server。
-
-```powershell
-# 从本地目录安装（与本仓库 dsh-jupyter 同样的 link 方式）
-dsh plugin --profile web add link:C:\Users\dongz\.dsh\workspace\dsh-mcphub
-```
 
 或发布到 npm 后：`dsh plugin --profile web add @dong-victor/dsh-mcphub`。
 
@@ -59,12 +54,21 @@ dsh plugin --profile web add link:C:\Users\dongz\.dsh\workspace\dsh-mcphub
 ## 开发
 
 ```powershell
-npm install        # 安装依赖（@modelcontextprotocol/sdk、zod、jsdom 等）
-npm test           # host-boot 冒烟 + 客户端 DOM 冒烟 + 对真实 MCPHub 的桥接端到端测试
+npm install        # 安装依赖（@modelcontextprotocol/sdk、zod、jsdom、react 等）
+npm test           # host-boot 冒烟 + 客户端槽位冒烟 + 对真实 MCPHub 的桥接端到端测试
 npm pack           # 打包发布
 ```
 
-测试说明：`bridge-live.test.mjs` 会真实连接本机 `http://localhost:3000` 的 MCPHub，发现工具并调用一个只读工具（如 `get_schema_info`），需要 MCPHub 在线。
+测试说明：
+
+- `client-smoke.test.mjs` 用**真实** `SlotCore`（`@deepseek-ai/dsh-client-ui-slots`）驱动 `apply()`，断言两个槽位占位成功、组件渲染、dispose 回收——槽位未声明时注册会抛错，因此通过即证明插件对准了宿主的槽位契约。
+- `bridge-live.test.mjs` 会真实连接本机 `http://localhost:3000` 的 MCPHub，发现工具并调用一个只读工具（如 `get_schema_info`），需要 MCPHub 在线。
+
+## 兼容性
+面向 **dsh 0.2.0-rc.2**。该版本有两处破坏性变更，本插件已相应改造：
+
+1. **工具 schema DSL**：`ctx.tools.register` 的 `output.schema` 改为经 `valueSchemaSpecToJsonSchema` 编译的 author-facing DSL（对象根必须写 `additionalProperties`、必填是每个属性的 `required: true` 注解、无约束负载用 `{ type: 'json' }`）；直接传原始 JSON Schema 会在注册时抛 `JsonSchemaError`。`parameters` 仍是原始 JSON Schema（上游 MCP `inputSchema` 原样透传）。
+2. **客户端槽位**：浏览器半个包导出 `inject` + `apply`，界面一律经 `ctx.slots` 注册（`sidebar.footer.action` / `main`），不再抓取 shell 的 CSS-module 类名；文案经 `ctx.locale.register` 注册命名空间后由框架注入 `t`。
 
 ## 已知限制
 

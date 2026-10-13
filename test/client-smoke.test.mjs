@@ -1,17 +1,28 @@
 /**
- * DOM smoke test for the @dong-victor/dsh-mcphub browser half.
+ * Client-half smoke test for @dong-victor/dsh-mcphub.
  *
- * Runs lib/client.js inside jsdom with a minimal dsh shell skeleton, drives
- * the real DOM paths: factory registration, apply/entry contract, sidebar
- * entry placement, panel mount into the conversation column, fetch -> status
- * render (badge, meta rows, server cards), refresh, error banner, and full
- * disposal.
+ * dsh 0.2.0-rc.2 replaced the CSS-module class names the previous build
+ * scraped with a slot registry, so this test drives the REAL registry
+ * (`@deepseek-ai/dsh-client-ui-slots`) instead of a hand-written DOM skeleton:
+ * it loads lib/client.js in jsdom, runs `apply()` against a stub context whose
+ * `slots` is a real `SlotCore` plus the documented `inject`/`register`
+ * wrapper, and asserts that
+ *
+ *   - the module exports the cordis `inject`/`apply` contract,
+ *   - the declarations land in `sidebar.panellist` and `main`,
+ *   - the glyph component renders from the `{ size, active }` the shell passes,
+ *   - the panel component renders the status payload,
+ *   - disposal removes both contributions and the injected stylesheet.
+ *
+ * The registry throws on an undeclared slot key, so a successful registration
+ * here is real evidence that the plugin targets declarations the shell owns.
  *
  * Usage: node test/client-smoke.test.mjs   (needs `npm i -D jsdom` once)
  */
 import { JSDOM } from 'jsdom'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { SlotCore } from '@deepseek-ai/dsh-client-ui-slots'
 
 let failures = 0
 function check(name, condition, detail) {
@@ -23,33 +34,24 @@ function check(name, condition, detail) {
   }
 }
 
-const html = `<!doctype html><html lang="zh"><head></head><body>
-  <div data-pane="sidebar">
-    <div class="root-abc">
-      <div class="logoRow-abc"><button class="newSession-abc">New Session</button></div>
-      <div class="regionArea-abc"></div>
-      <div class="footArea-abc">
-        <div class="footerActions-abc">
-          <div data-slot="sidebar.footer.action" style="display: contents;"><button class="railEntry-abc">plugins</button></div>
-        </div>
-        <div class="settingsArea-abc">
-          <div data-slot="sidebar.settings" style="display: contents;">
-            <button class="trigger-abc">设置</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <div class="centerCol-abc">
-    <div data-slot="conversation" style="display: contents;"><div class="chat">conversation</div></div>
-  </div>
-</body></html>`
-
-const dom = new JSDOM(html, { url: 'http://127.0.0.1:3080/', runScripts: 'outside-only', pretendToBeVisual: true })
+const dom = new JSDOM('<!doctype html><html lang="zh"><head></head><body><div id="root"></div></body></html>', {
+  url: 'http://127.0.0.1:3080/',
+  runScripts: 'outside-only',
+  pretendToBeVisual: true,
+})
 const { window } = dom
 const { document } = window
 
+// react-dom reads `window`/`document` as free globals when it computes event
+// priorities, so expose the jsdom surface before importing it. The plugin
+// itself only touches `document`, which the loader-provided scope supplies.
+for (const key of ['window', 'document', 'navigator', 'HTMLElement', 'Node', 'Element', 'MutationObserver', 'CustomEvent']) {
+  if (globalThis[key] === undefined && window[key] !== undefined) globalThis[key] = window[key]
+}
+globalThis.IS_REACT_ACT_ENVIRONMENT = true
+
 // --- fixtures --------------------------------------------------------------
+
 const fakeStatus = {
   ok: true,
   connected: true,
@@ -77,28 +79,62 @@ const fakeStatus = {
   lastSyncAt: new Date().toISOString(),
   health: { ok: true, status: 'healthy', servers: { total: 2, connected: 2, disconnected: 0 } },
 }
+
 const fetchCalls = []
 window.fetch = async (url) => {
   fetchCalls.push(String(url))
   return { ok: true, json: async () => fakeStatus }
 }
 
-// --- module loader capture --------------------------------------------------
-let registered = undefined
-window.__ModuleLoader__ = { load: (handoff) => { registered = handoff } }
+// React must resolve through the loader's `require`.
+const realRequire = (await import('node:module')).createRequire(import.meta.url)
 
-const source = readFileSync(fileURLToPath(new URL('../lib/client.js', import.meta.url)), 'utf8')
-window.eval(source)
+// --- module loader capture --------------------------------------------------
+
+let registered
+window.__ModuleLoader__ = { load: (handoff) => { registered = handoff } }
+window.eval(readFileSync(fileURLToPath(new URL('../lib/client.js', import.meta.url)), 'utf8'))
 
 check('bundle registers via __ModuleLoader__.load', registered !== undefined)
 check('registered id matches package name', registered?.id === '@dong-victor/dsh-mcphub')
 
-const moduleExports = registered.factory((spec) => { throw new Error(`unexpected require: ${spec}`) })
+const moduleExports = registered.factory((spec) => realRequire(spec))
 check('factory exports apply + inject', typeof moduleExports?.apply === 'function' && Array.isArray(moduleExports?.inject))
-check('inject waits for slots + locale', JSON.stringify(moduleExports.inject) === JSON.stringify(['slots', 'locale']))
+check(
+  'inject waits for slots + locale + layout',
+  JSON.stringify(moduleExports.inject) === JSON.stringify(['slots', 'locale', 'layout']),
+  JSON.stringify(moduleExports.inject),
+)
 
-// --- fake ctx ----------------------------------------------------------------
+// --- real slot runtime ------------------------------------------------------
+
+// Declarations are owned by a parent ENTRY's `children` table and live exactly
+// as long as that entry does, so the harness stands in for the shell: one
+// persistent "shell" entry mounted in `root` declares `main` (keyed) and
+// `sidebar.panellist` (list). Disposing the shell entry would collapse both
+// declarations — which is why it stays mounted for the whole test.
+const core = new SlotCore()
+const SHELL_DISPOSER = core.register({
+  name: 'root',
+  children: {
+    main: { kind: 'keyed', scope: 'root' },
+    'sidebar.panellist': { kind: 'list', scope: 'root' },
+  },
+}, () => null)
+
+for (const key of ['main', 'sidebar.panellist']) {
+  if (core.specDynamic(key) === undefined) throw new Error(`harness failed to declare slot "${key}"`)
+}
+
+const MAIN_TARGET = { kind: 'keyed', scope: 'root' }
+const PANEL_TARGET = { kind: 'list', scope: 'root' }
+
 const registeredLocales = {}
+const layoutSelection = { activePanelId: null }
+const layoutListeners = new Set()
+/** Slot keys the plugin asked to inject into, in order. */
+const declarations = []
+
 const ctx = {
   locale: {
     register(ns, dicts) {
@@ -107,6 +143,41 @@ const ctx = {
       registeredLocales.en = dicts.en
       return () => {}
     },
+    // REAL contract (`dsh-client-locale` ClientLocaleService.bind): returns a
+    // `(key, params) => string` translator that falls back to the key itself.
+    // The shell resolves the panel entry's `label` thunk through this, so a
+    // harness WITHOUT `bind` cannot catch a plugin that calls an undefined `t`
+    // — which is exactly how a crashing label shipped once already.
+    bind(ns) {
+      return (key, params) => {
+        let text = registeredLocales.zh?.[key] ?? key
+        if (params) for (const k of Object.keys(params)) text = text.split(`{${k}}`).join(String(params[k]))
+        return text
+      }
+    },
+  },
+  layout: {
+    panelInfo: {
+      getSnapshot: () => ({ activePanelId: layoutSelection.activePanelId }),
+      subscribe: (fn) => { layoutListeners.add(fn); return () => layoutListeners.delete(fn) },
+    },
+    selectPanel: (id) => {
+      layoutSelection.activePanelId = id
+      layoutListeners.forEach((fn) => fn())
+    },
+  },
+  slots: {
+    inject(name, fn) {
+      // Runtime contract: contribute only once the key is declared, and return
+      // a disposer that retracts the contribution. An undeclared key must NOT
+      // be registered (SlotCore throws); the harness records the attempt so
+      // the test can assert the plugin waits for real declarations.
+      declarations.push(name)
+      if (core.specDynamic(name) === undefined) return () => {}
+      return fn()
+    },
+    register: (options, component) => core.register(options, component),
+    entriesOfSlot: (key) => core.entriesOfSlot(key),
   },
   effect(fn) {
     const disposer = fn()
@@ -115,123 +186,141 @@ const ctx = {
   },
   effects: [],
 }
-moduleExports.apply(ctx)
 
+moduleExports.apply(ctx)
 await new Promise((resolve) => setTimeout(resolve, 60))
 
-// --- sidebar entry ------------------------------------------------------------
-const entry = document.querySelector('[data-dsh-mcphub-entry]')
-const footArea = document.querySelector('[class*="footArea"]')
-const settingsArea = document.querySelector('[class*="settingsArea"]')
-const trigger = settingsArea?.querySelector('button[class*="trigger"]')
-check('sidebar entry mounted', entry !== null)
-check('entry is a direct child of the foot area', entry?.parentElement === footArea, entry?.parentElement?.className)
-check('entry sits directly above the settings area', settingsArea?.previousElementSibling === entry)
-check('entry stays out of the settings area', settingsArea?.contains(entry) === false)
-check('entry keeps footer actions above it', footArea?.children[0]?.className === 'footerActions-abc')
+check('declared slots targeted', declarations.includes('main') && declarations.includes('sidebar.panellist'), declarations.join(','))
 check('locale registered under dsh-mcphub', registeredLocales.ns === 'dsh-mcphub')
 check('zh dict has entry.label', registeredLocales.zh?.['entry.label'] === 'MCPHub')
-check('entry label text rendered (zh)', entry?.querySelector('.mh-entryLabel')?.textContent === 'MCPHub')
+check('en dict mirrors every zh key',
+  Object.keys(registeredLocales.zh ?? {}).sort().join(',') === Object.keys(registeredLocales.en ?? {}).sort().join(','))
 
-// --- sidebar inline summary (no click needed) -------------------------------------
-const entryCount = entry?.querySelector('.mh-entryCount')?.textContent ?? ''
-check('entry tool count rendered', entryCount === '3', entryCount)
-check('connection dot is ok', entry?.querySelector('.mh-dot')?.classList.contains('ok'))
-check('entry fetch uses plain status path (host cache)', fetchCalls.length > 0 && fetchCalls[0] === '/api/dsh-mcphub/status')
+// --- the two contributions actually landed ----------------------------------
 
-// --- rail (collapsed) mode ----------------------------------------------------------
-check('wide mode: entry has no data-rail', !entry?.hasAttribute('data-rail'))
-// CSS-module style: "_rail" suffix (underscore is a word char, \brail\b would miss it)
-if (trigger) trigger.className = 'VOzbGW_trigger VOzbGW_rail'
-await new Promise((resolve) => setTimeout(resolve, 60))
-check('rail mode (css-module class): entry switches to data-rail', entry?.hasAttribute('data-rail'))
-if (trigger) trigger.className = 'trigger-abc'
-await new Promise((resolve) => setTimeout(resolve, 60))
-check('wide mode restored: data-rail removed', !entry?.hasAttribute('data-rail'))
-// hyphenated style
-trigger?.classList.add('trigger-rail-abc')
-await new Promise((resolve) => setTimeout(resolve, 60))
-check('rail mode (hyphen class): entry switches to data-rail', entry?.hasAttribute('data-rail'))
-trigger?.classList.remove('trigger-rail-abc')
-await new Promise((resolve) => setTimeout(resolve, 60))
-check('wide mode restored again', !entry?.hasAttribute('data-rail'))
+const mainEntries = core.entriesOfSlot('main')
+const panelEntries = core.entriesOfSlot('sidebar.panellist')
+check('main slot has the mcphub occupant', mainEntries.some((e) => e.options.key === 'mcphub'),
+  mainEntries.map((e) => e.options.key).join(','))
+check('sidebar.panellist slot has a mcphub entry', panelEntries.length >= 1, String(panelEntries.length))
+check('panel entry declares the dsh-mcphub locale namespace',
+  panelEntries.every((e) => e.options.locale === undefined || e.options.locale === 'dsh-mcphub'))
+check('panel entry id matches the main panel key',
+  panelEntries.some((e) => e.options.id === 'mcphub'),
+  panelEntries.map((e) => e.options.id).join(','))
+check('the footer seat is no longer contributed',
+  core.entriesOfSlot('sidebar.footer.action').length === 0)
 
-// --- open panel -----------------------------------------------------------------
-entry.click()
-await new Promise((resolve) => setTimeout(resolve, 80))
+const panelEntry = panelEntries[panelEntries.length - 1]
+const GlyphComponent = panelEntry?.component
+const MainComponent = mainEntries.find((e) => e.options.key === 'mcphub')?.component
 
-const view = document.querySelector('[data-dsh-mcphub-view]')
-check('panel view mounted in the center column', view !== null && view?.parentElement?.matches('[class*="centerCol"]'), view?.parentElement?.className)
-check('panel view sits after the conversation slot', view !== null && view?.parentElement?.querySelector('[data-slot="conversation"]') !== null)
-check('html carries data-dsh-mcphub-active', document.documentElement.hasAttribute('data-dsh-mcphub-active'))
+// --- the label thunk the SHELL calls -----------------------------------------
+// `dsh-client-ui-sidebar` builds its menu with
+// `resolveSlotLabel(options.label)` inside `syncPanels`; anything thrown there
+// escapes into the shell's effect and deactivates the whole sidebar plugin.
+// So invoke the thunk exactly as the shell does, through the real resolver.
+const { resolveSlotLabel } = await import('@deepseek-ai/dsh-client-ui-slots')
+check('the label thunk does not throw when the shell resolves it', (() => {
+  try { resolveSlotLabel(panelEntry?.options?.label); return true } catch { return false }
+})())
+check('the label resolves to the localized display name',
+  resolveSlotLabel(panelEntry?.options?.label) === 'MCPHub',
+  String(resolveSlotLabel(panelEntry?.options?.label)))
 
-const stateBadge = document.querySelector('.mh-stateBadge')
-check('state badge shows connected + ok class', stateBadge?.textContent === '已连接' && stateBadge?.classList.contains('ok'))
-check('endpoint meta rendered', document.body.textContent.includes('http://localhost:3000/mcp'))
-check('group meta shows global', document.body.textContent.includes('全局聚合'))
-check('health meta rendered', document.body.textContent.includes('2/2 已连接'))
+// --- render the panel glyph (the shell owns the row) -------------------------
 
-const cards = document.querySelectorAll('.mh-card')
-check('two server cards rendered', cards.length === 2)
+const { createRoot } = await import('react-dom/client')
+const { createElement, act } = await import('react')
+
+const host = document.createElement('div')
+document.body.append(host)
+const root = createRoot(host)
+
+const t = (key, params) => {
+  let text = registeredLocales.zh[key] ?? key
+  if (params) for (const k of Object.keys(params)) text = text.split(`{${k}}`).join(String(params[k]))
+  return text
+}
+
+// EXACTLY the props the shell passes to `sidebar.panellist`: `{ size, active }`.
+// Supplying more would hide a real crash — that is how the missing entry shipped.
+await act(async () => {
+  root.render(createElement(GlyphComponent, { size: 16, active: false }))
+})
+check('panel glyph renders an icon with only { size, active }',
+  host.querySelector('svg') !== null, host.innerHTML.slice(0, 80))
+check('panel glyph renders nothing else (the shell supplies the label)', host.querySelector('span') === null)
+
+await act(async () => {
+  root.render(createElement(GlyphComponent, { size: 18, active: true }))
+})
+check('panel glyph renders for the collapsed rail size too', host.querySelector('svg') !== null)
+
+// --- selecting the panel -----------------------------------------------------
+// The shell owns the row and its click handler (`selectPanel(id)`), and the
+// glyph carries no active styling of its own, so what matters here is that the
+// id we registered is the one the shell will select with.
+
+await act(async () => { ctx.layout.selectPanel('mcphub') })
+await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+check('panel entry id selects the main panel via ctx.layout',
+  layoutSelection.activePanelId === 'mcphub', String(layoutSelection.activePanelId))
+check('the main panel is registered under that same key',
+  mainEntries.some((e) => e.options.key === 'mcphub'))
+
+// --- render the panel --------------------------------------------------------
+
+const panelHost = document.createElement('div')
+document.body.append(panelHost)
+const panelRoot = createRoot(panelHost)
+await act(async () => {
+  panelRoot.render(createElement(MainComponent, {
+    t,
+    usePanelInfo: () => ({ activePanelId: layoutSelection.activePanelId }),
+  }))
+})
+await act(async () => { await new Promise((r) => setTimeout(r, 60)) })
+
+const badge = panelHost.querySelector('.mh-stateBadge')
+check('state badge shows connected + ok class', badge?.textContent === '已连接' && badge?.classList.contains('ok'),
+  badge?.textContent)
+check('endpoint meta rendered', panelHost.textContent.includes('http://localhost:3000/mcp'))
+check('group meta shows global', panelHost.textContent.includes('全局聚合'))
+check('health meta rendered', panelHost.textContent.includes('2/2 已连接'))
+
+const cards = panelHost.querySelectorAll('.mh-card')
+check('two server cards rendered', cards.length === 2, String(cards.length))
 check('card names correct', cards[0]?.querySelector('.mh-cardName')?.textContent === 'cassiopeia-ap-mysql')
 check('card tool counts rendered', (cards[0]?.querySelector('.mh-cardCount')?.textContent ?? '').includes('2'))
 
-// expand the first card
-cards[0]?.querySelector('.mh-cardHead')?.click()
 const toolRows = cards[0]?.querySelectorAll('.mh-toolRow') ?? []
-check('expanded card shows its tool rows', toolRows.length === 2)
-check('tool row shows the DSH callable public name', (toolRows[0]?.textContent ?? '').includes('mcp__mcphub__cassiopeia-ap-mysql-execute_sql'))
-check('cards container visible', !document.querySelector('.mh-cards')?.hidden)
+check('card lists every tool row', toolRows.length === 2, String(toolRows.length))
+check('tool row shows the DSH callable public name',
+  (toolRows[0]?.textContent ?? '').includes('mcp__mcphub__cassiopeia-ap-mysql-execute_sql'))
 
-// --- refresh -----------------------------------------------------------------------
-const fetchBefore = fetchCalls.length
-document.querySelector('.mh-iconBtn[title="刷新"]').click()
-await new Promise((resolve) => setTimeout(resolve, 80))
-check('refresh button hits ?refresh=1', fetchCalls.length > fetchBefore && fetchCalls[fetchCalls.length - 1].includes('refresh=1'))
+// --- error path --------------------------------------------------------------
 
-// --- error banner path --------------------------------------------------------------
 window.fetch = async () => ({ ok: false, json: async () => ({ ok: false, error: 'MCPHub unreachable' }) })
-document.querySelector('.mh-iconBtn[title="刷新"]').click()
-await new Promise((resolve) => setTimeout(resolve, 80))
-const banner = document.querySelector('.mh-banner')
-check('error banner visible on failure', banner !== null && !banner.hidden && banner.textContent.includes('状态查询失败'))
-window.fetch = async (url) => { fetchCalls.push(String(url)); return { ok: true, json: async () => fakeStatus } }
+const refreshButton = panelHost.querySelector('.mh-iconBtn')
+await act(async () => { refreshButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true })) })
+await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+const banner = panelHost.querySelector('.mh-banner')
+check('error banner visible on failure', banner !== null && banner.textContent.includes('状态查询失败'), banner?.textContent)
 
-// --- close / disposal -----------------------------------------------------------------
-document.querySelector('.mh-iconBtn[title="关闭"]').click()
-check('close removes active attr', !document.documentElement.hasAttribute('data-dsh-mcphub-active'))
-check('entry loses active state', !entry.hasAttribute('data-active'))
+// --- disposal ----------------------------------------------------------------
 
 for (const dispose of ctx.effects.splice(0)) dispose()
-await new Promise((resolve) => setTimeout(resolve, 30))
-check('dispose removes sidebar entry', document.querySelector('[data-dsh-mcphub-entry]') === null)
-check('dispose removes panel view', document.querySelector('[data-dsh-mcphub-view]') === null)
-check('dispose removes active attr', !document.documentElement.hasAttribute('data-dsh-mcphub-active'))
-check('dispose removes injected style', document.getElementById('dsh-mcphub-style') === null)
-
-// --- legacy shell (no footArea): fall back into the settings area --------------
-const legacyDom = new JSDOM(`<!doctype html><html lang="zh"><body>
-  <div data-pane="sidebar"><div class="root-abc">
-    <div class="logoRow-abc"><button class="newSession-abc">New Session</button></div>
-    <div class="settingsArea-abc"><div data-slot="sidebar.settings" style="display: contents;">
-      <button class="trigger-abc">设置</button></div></div>
-  </div></div>
-  <div class="centerCol-abc"></div>
-</body></html>`, { url: 'http://127.0.0.1:3080/', runScripts: 'outside-only', pretendToBeVisual: true })
-legacyDom.window.fetch = async () => ({ ok: true, json: async () => fakeStatus })
-let legacyRegistered
-legacyDom.window.__ModuleLoader__ = { load: (handoff) => { legacyRegistered = handoff } }
-legacyDom.window.eval(source)
-legacyRegistered.factory(() => { throw new Error('unexpected require') }).apply({
-  locale: { register: () => () => {} },
-  effect: (fn) => { fn(); return () => {} },
+await act(async () => {
+  root.render(null)
+  panelRoot.render(null)
 })
-await new Promise((resolve) => setTimeout(resolve, 60))
-const legacyDoc = legacyDom.window.document
-const legacyEntry = legacyDoc.querySelector('[data-dsh-mcphub-entry]')
-const legacyTrigger = legacyDoc.querySelector('button[class*="trigger"]')
-check('legacy shell: entry falls back above the settings trigger', legacyEntry !== null && legacyTrigger?.previousElementSibling === legacyEntry, legacyEntry?.parentElement?.className)
-legacyDom.window.close()
+await new Promise((resolve) => setTimeout(resolve, 30))
+
+check('dispose drops the main contribution', core.entriesOfSlot('main').some((e) => e.options.key === 'mcphub') === false)
+check('dispose drops the panel-menu contribution', core.entriesOfSlot('sidebar.panellist').length === 0,
+  String(core.entriesOfSlot('sidebar.panellist').length))
+check('dispose removes injected style', document.getElementById('dsh-mcphub-style') === null)
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`)
 process.exit(failures === 0 ? 0 : 1)
