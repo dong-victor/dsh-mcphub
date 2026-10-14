@@ -1,6 +1,6 @@
 {
   "name": "@dong-victor/dsh-mcphub",
-  "description": "MCPHub 桥接插件（DSH Web GUI）：把本地 MCPHub（http://localhost:3000，@samanhappy/mcphub）聚合暴露的全部 MCP server 工具桥接进 DSH。宿主侧以 MCP Streamable HTTP 客户端连接 MCPHub 聚合端点 /mcp（或 /mcp/<group> 分组端点），把发现到的工具以 mcp__mcphub__<server>-<tool> 形式注册为 agent 原生工具；提供 mcphub_status / mcphub_resync 两个 agent 工具，/api/dsh-mcphub/status 环回路由与侧边栏「MCPHub」面板（连接状态、server/工具清单、一键打开 MCPHub Dashboard）。断线自动指数退避重连、工具集热同步（tools/list_changed），无需改 dsh 源码。",
+  "description": "MCPHub 桥接插件（DSH Web GUI）：把本地 MCPHub（http://localhost:3000，@samanhappy/mcphub）聚合暴露的全部 MCP server 工具桥接进 DSH。宿主侧以 MCP Streamable HTTP 客户端连接 MCPHub 聚合端点 /mcp（或 /mcp/<group> 分组端点），把发现到的工具以 mcp__mcphub__<server>-<tool> 形式注册为 agent 原生工具；提供 mcphub_status / mcphub_resync 两个 agent 工具，/api/dsh-mcphub/status 环回路由，以及本插件在 DSH 插件管理页详情页中的「MCPHub 桥接」状态区块（连接状态、server/工具清单、一键打开 MCPHub Dashboard）。断线自动指数退避重连、工具集热同步（tools/list_changed），无需改 dsh 源码。",
   "version": "0.2.1",
   "type": "module",
   "engines": {

@@ -17,9 +17,9 @@ mcp__mcphub__<server名>-<工具名>
 - **agent 工具**：
   - `mcphub_status` —— 连接状态、端点、server / 工具清单（含 DSH 可调用名）、MCPHub `/health`；
   - `mcphub_resync` —— 强制重新同步工具集（MCPHub 侧增删改 server / 工具后使用）。
-- **侧边栏「MCPHub」入口**：注册到侧边栏底部 `sidebar.footer.action` 槽位（list 类型，位于设置行上方），整行形态显示 图标 + 「MCPHub」+ **当前桥接工具数徽章**（未连接时显示 `--`）；折叠为轨道时自动切换成图标 + 连接状态点。点击在状态面板与对话之间切换。
-- **状态面板**：作为 `main` 槽位（keyed，key = `mcphub`）的占位组件挂载，经 `ctx.layout.selectPanel('mcphub')` 选中；包含连接徽章、端点 / 分组 / 健康 / 上次同步 / 最近错误、按 server 分组的工具清单（可展开）、「打开 MCPHub Dashboard」外链、手动刷新。
-- **健壮性**：断线自动指数退避重连（工具在中断期保持注册、调用报错，恢复后自动重同步）；监听 `notifications/tools/list_changed` 热同步工具集；MCPHub 不可达时插件照常激活，状态面板如实显示。
+- **插件详情页「MCPHub 桥接」区块**：注册到 DSH 插件管理页的 `plugins.detail.section` 槽位（list 类型），只在本插件（`@dong-victor/dsh-mcphub`）**自己的详情页**渲染——入口为 **设置 → 插件 → MCPHub → 详情**。区块内容：连接徽章、端点 / 分组 / 健康 / 上次同步 / 最近错误、按 server 分组的工具清单（可展开）、「打开 MCPHub Dashboard」外链、手动刷新。
+  - 槽位契约要求每个注册项自行判断「当前打开的是哪个插件的详情页」，对不属于自己的 subject 返回 `null`；本插件只匹配 `{ kind: 'bundle', pkg: { name: '@dong-victor/dsh-mcphub' } }`，包内某个 row 的详情页（`kind: 'row'`）不重复渲染。
+- **健壮性**：断线自动指数退避重连（工具在中断期保持注册、调用报错，恢复后自动重同步）；监听 `notifications/tools/list_changed` 热同步工具集；MCPHub 不可达时插件照常激活，详情页区块如实显示。
 - **宿主路由**：`GET /api/dsh-mcphub/status`（环回地址保护、TTL 缓存、`?refresh=1` 绕过）。
 
 ## 安装
@@ -61,20 +61,24 @@ npm pack           # 打包发布
 
 测试说明：
 
-- `client-smoke.test.mjs` 用**真实** `SlotCore`（`@deepseek-ai/dsh-client-ui-slots`）驱动 `apply()`，断言两个槽位占位成功、组件渲染、dispose 回收——槽位未声明时注册会抛错，因此通过即证明插件对准了宿主的槽位契约。
+- `client-smoke.test.mjs` 用**真实** `SlotCore`（`@deepseek-ai/dsh-client-ui-slots`）驱动 `apply()`，断言槽位占位成功、区块渲染、对非本插件 subject 返回 `null`、dispose 回收——槽位未声明时注册会抛错，因此通过即证明插件对准了宿主的槽位契约。
+- `entry-layout.test.mjs` 以插件管理页的真实契约（`plugins.detail.section` 为 list、每个注册项拿到当前详情页的 subject）驱动同一套真实 `SlotCore`，并**故意声明**已废弃的 `sidebar.panellist` / `main` / `sidebar.footer.action` 三个槽位，用来正面证明插件不再注册进它们（而不是因为槽位未声明才「恰好」没注册）。
 - `bridge-live.test.mjs` 会真实连接本机 `http://localhost:3000` 的 MCPHub，发现工具并调用一个只读工具（如 `get_schema_info`），需要 MCPHub 在线。
 
 ## 兼容性
 面向 **dsh 0.2.0-rc.2**。该版本有两处破坏性变更，本插件已相应改造：
 
 1. **工具 schema DSL**：`ctx.tools.register` 的 `output.schema` 改为经 `valueSchemaSpecToJsonSchema` 编译的 author-facing DSL（对象根必须写 `additionalProperties`、必填是每个属性的 `required: true` 注解、无约束负载用 `{ type: 'json' }`）；直接传原始 JSON Schema 会在注册时抛 `JsonSchemaError`。`parameters` 仍是原始 JSON Schema（上游 MCP `inputSchema` 原样透传）。
-2. **客户端槽位**：浏览器半个包导出 `inject` + `apply`，界面一律经 `ctx.slots` 注册（`sidebar.footer.action` / `main`），不再抓取 shell 的 CSS-module 类名；文案经 `ctx.locale.register` 注册命名空间后由框架注入 `t`。
+2. **客户端槽位**：浏览器半个包导出 `inject` + `apply`，界面一律经 `ctx.slots` 注册，不再抓取 shell 的 CSS-module 类名；文案经 `ctx.locale.register` 注册命名空间后由框架注入 `t`。
+
+界面挂载点历经三次迁移：`sidebar.footer.action`（设置行上方的底部整行）→ `sidebar.panellist` + `main`（左侧全局面板菜单行 + 中央状态页）→ 当前的 `plugins.detail.section`（插件管理页本插件详情页的区块）。**迁移到详情页后左侧菜单不再出现 MCPHub 行**，这是有意为之：桥接状态属于它所描述的插件，不该长期占用全局面板菜单位。
 
 ## 已知限制
 
 - 只桥接**工具**能力：MCP 的 resources / prompts 暂不暴露（与 dsh-mcp-client 相同）。
 - 工具名中的 `<server名>` 前缀来自 MCPHub 配置；在 MCPHub 中改名会导致工具名变化（可 `mcphub_resync` 刷新）。
-- 面板中的 server 分组基于工具名前缀启发式推断（展示用），调用始终使用完整工具名，不受影响。
+- 区块中的 server 分组基于工具名前缀启发式推断（展示用），调用始终使用完整工具名，不受影响。
+- 状态区块只在插件管理页的本插件详情页可见，没有常驻入口；需要随时查看可让 agent 调用 `mcphub_status`。
 - 依赖 MCPHub 服务在线；服务端会话在插件重连后会重建。
 
 ## 许可

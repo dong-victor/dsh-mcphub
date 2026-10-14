@@ -9,10 +9,11 @@
  * wrapper, and asserts that
  *
  *   - the module exports the cordis `inject`/`apply` contract,
- *   - the declarations land in `sidebar.panellist` and `main`,
- *   - the glyph component renders from the `{ size, active }` the shell passes,
- *   - the panel component renders the status payload,
- *   - disposal removes both contributions and the injected stylesheet.
+ *   - the declaration lands in `plugins.detail.section`,
+ *   - the section renders its status payload for its OWN package's subject,
+ *   - the section renders NOTHING for any other subject (another bundle, a row,
+ *     an official plugin item) — the page hands every entry every page,
+ *   - disposal removes the contribution and the injected stylesheet.
  *
  * The registry throws on an undeclared slot key, so a successful registration
  * here is real evidence that the plugin targets declarations the shell owns.
@@ -100,38 +101,39 @@ check('registered id matches package name', registered?.id === '@dong-victor/dsh
 
 const moduleExports = registered.factory((spec) => realRequire(spec))
 check('factory exports apply + inject', typeof moduleExports?.apply === 'function' && Array.isArray(moduleExports?.inject))
-check(
-  'inject waits for slots + locale + layout',
-  JSON.stringify(moduleExports.inject) === JSON.stringify(['slots', 'locale', 'layout']),
-  JSON.stringify(moduleExports.inject),
-)
+check('inject waits for slots + locale',
+  JSON.stringify(moduleExports.inject) === JSON.stringify(['slots', 'locale']),
+  JSON.stringify(moduleExports.inject))
 
 // --- real slot runtime ------------------------------------------------------
 
 // Declarations are owned by a parent ENTRY's `children` table and live exactly
-// as long as that entry does, so the harness stands in for the shell: one
-// persistent "shell" entry mounted in `root` declares `main` (keyed) and
-// `sidebar.panellist` (list). Disposing the shell entry would collapse both
-// declarations — which is why it stays mounted for the whole test.
+// as long as that entry does, so the harness stands in for the plugin-manager
+// page: one persistent "shell" entry mounted in `root` declares
+// `plugins.detail.section` (list) and the two seats the plugin USED to occupy
+// (`main`, `sidebar.panellist`) plus `sidebar.footer.action`. Disposing the
+// shell entry would collapse the declarations — which is why it stays mounted
+// for the whole test. Declaring the retired seats on purpose lets the test
+// prove positively that nothing registers into them any more, rather than
+// passing only because the keys happen to be undeclared.
 const core = new SlotCore()
 const SHELL_DISPOSER = core.register({
   name: 'root',
   children: {
+    'plugins.detail.section': { kind: 'list', scope: 'root' },
     main: { kind: 'keyed', scope: 'root' },
     'sidebar.panellist': { kind: 'list', scope: 'root' },
+    'sidebar.footer.action': { kind: 'list', scope: 'root' },
   },
 }, () => null)
 
-for (const key of ['main', 'sidebar.panellist']) {
+for (const key of ['plugins.detail.section', 'main', 'sidebar.panellist', 'sidebar.footer.action']) {
   if (core.specDynamic(key) === undefined) throw new Error(`harness failed to declare slot "${key}"`)
 }
 
-const MAIN_TARGET = { kind: 'keyed', scope: 'root' }
-const PANEL_TARGET = { kind: 'list', scope: 'root' }
+const SECTION_TARGET = { kind: 'list', scope: 'root' }
 
 const registeredLocales = {}
-const layoutSelection = { activePanelId: null }
-const layoutListeners = new Set()
 /** Slot keys the plugin asked to inject into, in order. */
 const declarations = []
 
@@ -143,27 +145,12 @@ const ctx = {
       registeredLocales.en = dicts.en
       return () => {}
     },
-    // REAL contract (`dsh-client-locale` ClientLocaleService.bind): returns a
-    // `(key, params) => string` translator that falls back to the key itself.
-    // The shell resolves the panel entry's `label` thunk through this, so a
-    // harness WITHOUT `bind` cannot catch a plugin that calls an undefined `t`
-    // — which is exactly how a crashing label shipped once already.
+    // REAL contract (`dsh-client-locale` ClientLocaleService.bind). The plugin
+    // no longer resolves any copy outside a component (the panel row's `label`
+    // thunk is gone with the row), so `bind` is kept only to prove the plugin
+    // does not reach for it any more.
     bind(ns) {
-      return (key, params) => {
-        let text = registeredLocales.zh?.[key] ?? key
-        if (params) for (const k of Object.keys(params)) text = text.split(`{${k}}`).join(String(params[k]))
-        return text
-      }
-    },
-  },
-  layout: {
-    panelInfo: {
-      getSnapshot: () => ({ activePanelId: layoutSelection.activePanelId }),
-      subscribe: (fn) => { layoutListeners.add(fn); return () => layoutListeners.delete(fn) },
-    },
-    selectPanel: (id) => {
-      layoutSelection.activePanelId = id
-      layoutListeners.forEach((fn) => fn())
+      throw new Error('the plugin must not resolve copy outside a component any more')
     },
   },
   slots: {
@@ -190,45 +177,35 @@ const ctx = {
 moduleExports.apply(ctx)
 await new Promise((resolve) => setTimeout(resolve, 60))
 
-check('declared slots targeted', declarations.includes('main') && declarations.includes('sidebar.panellist'), declarations.join(','))
+check('declared slot targeted', declarations.includes('plugins.detail.section'), declarations.join(','))
+check('the retired sidebar seats are never asked for',
+  !declarations.includes('sidebar.panellist') && !declarations.includes('main'),
+  declarations.join(','))
 check('locale registered under dsh-mcphub', registeredLocales.ns === 'dsh-mcphub')
-check('zh dict has entry.label', registeredLocales.zh?.['entry.label'] === 'MCPHub')
+check('zh dict has section.title', registeredLocales.zh?.['section.title'] === 'MCPHub 桥接')
+check('the retired entry.label key is gone', registeredLocales.zh?.['entry.label'] === undefined)
 check('en dict mirrors every zh key',
   Object.keys(registeredLocales.zh ?? {}).sort().join(',') === Object.keys(registeredLocales.en ?? {}).sort().join(','))
 
-// --- the two contributions actually landed ----------------------------------
+// --- the one contribution actually landed ------------------------------------
 
-const mainEntries = core.entriesOfSlot('main')
-const panelEntries = core.entriesOfSlot('sidebar.panellist')
-check('main slot has the mcphub occupant', mainEntries.some((e) => e.options.key === 'mcphub'),
-  mainEntries.map((e) => e.options.key).join(','))
-check('sidebar.panellist slot has a mcphub entry', panelEntries.length >= 1, String(panelEntries.length))
-check('panel entry declares the dsh-mcphub locale namespace',
-  panelEntries.every((e) => e.options.locale === undefined || e.options.locale === 'dsh-mcphub'))
-check('panel entry id matches the main panel key',
-  panelEntries.some((e) => e.options.id === 'mcphub'),
-  panelEntries.map((e) => e.options.id).join(','))
-check('the footer seat is no longer contributed',
-  core.entriesOfSlot('sidebar.footer.action').length === 0)
+const sectionEntries = core.entriesOfSlot('plugins.detail.section')
+check('plugins.detail.section has exactly the mcphub entry', sectionEntries.length === 1,
+  String(sectionEntries.length))
+check('section entry carries the mcphub id', sectionEntries[0]?.options.id === 'mcphub',
+  String(sectionEntries[0]?.options.id))
+check('section entry declares the dsh-mcphub locale namespace',
+  sectionEntries[0]?.options.locale === undefined || sectionEntries[0]?.options.locale === 'dsh-mcphub')
 
-const panelEntry = panelEntries[panelEntries.length - 1]
-const GlyphComponent = panelEntry?.component
-const MainComponent = mainEntries.find((e) => e.options.key === 'mcphub')?.component
+// The retired surfaces must be empty even though the harness DECLARED them.
+for (const retired of ['main', 'sidebar.panellist', 'sidebar.footer.action']) {
+  check(`the retired "${retired}" seat is empty`,
+    core.entriesOfSlot(retired).length === 0, String(core.entriesOfSlot(retired).length))
+}
 
-// --- the label thunk the SHELL calls -----------------------------------------
-// `dsh-client-ui-sidebar` builds its menu with
-// `resolveSlotLabel(options.label)` inside `syncPanels`; anything thrown there
-// escapes into the shell's effect and deactivates the whole sidebar plugin.
-// So invoke the thunk exactly as the shell does, through the real resolver.
-const { resolveSlotLabel } = await import('@deepseek-ai/dsh-client-ui-slots')
-check('the label thunk does not throw when the shell resolves it', (() => {
-  try { resolveSlotLabel(panelEntry?.options?.label); return true } catch { return false }
-})())
-check('the label resolves to the localized display name',
-  resolveSlotLabel(panelEntry?.options?.label) === 'MCPHub',
-  String(resolveSlotLabel(panelEntry?.options?.label)))
+const SectionComponent = sectionEntries[0]?.component
 
-// --- render the panel glyph (the shell owns the row) -------------------------
+// --- render the section for ITS OWN package ----------------------------------
 
 const { createRoot } = await import('react-dom/client')
 const { createElement, act } = await import('react')
@@ -243,53 +220,28 @@ const t = (key, params) => {
   return text
 }
 
-// EXACTLY the props the shell passes to `sidebar.panellist`: `{ size, active }`.
-// Supplying more would hide a real crash — that is how the missing entry shipped.
-await act(async () => {
-  root.render(createElement(GlyphComponent, { size: 16, active: false }))
-})
-check('panel glyph renders an icon with only { size, active }',
-  host.querySelector('svg') !== null, host.innerHTML.slice(0, 80))
-check('panel glyph renders nothing else (the shell supplies the label)', host.querySelector('span') === null)
+/** The subject shape the plugin-manager page passes for a bundle page. */
+const ownSubject = {
+  kind: 'bundle',
+  pkg: { name: '@dong-victor/dsh-mcphub', version: '0.2.1', installed: true, enabled: true, rows: [] },
+}
 
 await act(async () => {
-  root.render(createElement(GlyphComponent, { size: 18, active: true }))
-})
-check('panel glyph renders for the collapsed rail size too', host.querySelector('svg') !== null)
-
-// --- selecting the panel -----------------------------------------------------
-// The shell owns the row and its click handler (`selectPanel(id)`), and the
-// glyph carries no active styling of its own, so what matters here is that the
-// id we registered is the one the shell will select with.
-
-await act(async () => { ctx.layout.selectPanel('mcphub') })
-await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
-check('panel entry id selects the main panel via ctx.layout',
-  layoutSelection.activePanelId === 'mcphub', String(layoutSelection.activePanelId))
-check('the main panel is registered under that same key',
-  mainEntries.some((e) => e.options.key === 'mcphub'))
-
-// --- render the panel --------------------------------------------------------
-
-const panelHost = document.createElement('div')
-document.body.append(panelHost)
-const panelRoot = createRoot(panelHost)
-await act(async () => {
-  panelRoot.render(createElement(MainComponent, {
-    t,
-    usePanelInfo: () => ({ activePanelId: layoutSelection.activePanelId }),
-  }))
+  root.render(createElement(SectionComponent, { subject: ownSubject, t }))
 })
 await act(async () => { await new Promise((r) => setTimeout(r, 60)) })
 
-const badge = panelHost.querySelector('.mh-stateBadge')
+check('section renders for its own package subject', host.querySelector('.mh-section') !== null,
+  host.innerHTML.slice(0, 80))
+
+const badge = host.querySelector('.mh-stateBadge')
 check('state badge shows connected + ok class', badge?.textContent === '已连接' && badge?.classList.contains('ok'),
   badge?.textContent)
-check('endpoint meta rendered', panelHost.textContent.includes('http://localhost:3000/mcp'))
-check('group meta shows global', panelHost.textContent.includes('全局聚合'))
-check('health meta rendered', panelHost.textContent.includes('2/2 已连接'))
+check('endpoint meta rendered', host.textContent.includes('http://localhost:3000/mcp'))
+check('group meta shows global', host.textContent.includes('全局聚合'))
+check('health meta rendered', host.textContent.includes('2/2 已连接'))
 
-const cards = panelHost.querySelectorAll('.mh-card')
+const cards = host.querySelectorAll('.mh-card')
 check('two server cards rendered', cards.length === 2, String(cards.length))
 check('card names correct', cards[0]?.querySelector('.mh-cardName')?.textContent === 'cassiopeia-ap-mysql')
 check('card tool counts rendered', (cards[0]?.querySelector('.mh-cardCount')?.textContent ?? '').includes('2'))
@@ -299,13 +251,48 @@ check('card lists every tool row', toolRows.length === 2, String(toolRows.length
 check('tool row shows the DSH callable public name',
   (toolRows[0]?.textContent ?? '').includes('mcp__mcphub__cassiopeia-ap-mysql-execute_sql'))
 
+// --- render the section for OTHER subjects (must draw nothing) ---------------
+// The page renders every registered section entry with the subject of
+// whichever page is open, so an entry that draws for a foreign subject paints
+// this plugin's status onto another plugin's page.
+
+const foreignSubjects = [
+  ['another bundle', { kind: 'bundle', pkg: { ...ownSubject.pkg, name: '@deepseek-ai/dsh-mnemon' } }],
+  // A row page carries the same `pkg.name` but is a DIFFERENT, nested page;
+  // matching it would repeat the whole status block one level down.
+  ['a row page of this bundle', {
+    kind: 'row',
+    pkg: ownSubject.pkg,
+    row: { rowId: 'mcphub', moduleName: '@dong-victor/dsh-mcphub', enabled: true },
+  }],
+  ['an official plugin item', { kind: 'item', id: 'general' }],
+  ['a missing subject', undefined],
+  ['a subject with no package', { kind: 'bundle' }],
+  ['a subject whose package lacks a name', { kind: 'bundle', pkg: {} }],
+  ['a subject from a newer host shape', { kind: 'somethingNew', pkg: ownSubject.pkg }],
+]
+
+for (const [label, subject] of foreignSubjects) {
+  await act(async () => {
+    root.render(createElement(SectionComponent, { subject, t }))
+  })
+  await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+  check(`section renders nothing for ${label}`, host.innerHTML === '', host.innerHTML.slice(0, 80))
+}
+
 // --- error path --------------------------------------------------------------
+// Re-mount the real subject before exercising the refresh control.
+
+await act(async () => {
+  root.render(createElement(SectionComponent, { subject: ownSubject, t }))
+})
+await act(async () => { await new Promise((r) => setTimeout(r, 40)) })
 
 window.fetch = async () => ({ ok: false, json: async () => ({ ok: false, error: 'MCPHub unreachable' }) })
-const refreshButton = panelHost.querySelector('.mh-iconBtn')
+const refreshButton = host.querySelector('.mh-iconBtn')
 await act(async () => { refreshButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true })) })
 await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
-const banner = panelHost.querySelector('.mh-banner')
+const banner = host.querySelector('.mh-banner')
 check('error banner visible on failure', banner !== null && banner.textContent.includes('状态查询失败'), banner?.textContent)
 
 // --- disposal ----------------------------------------------------------------
@@ -313,13 +300,12 @@ check('error banner visible on failure', banner !== null && banner.textContent.i
 for (const dispose of ctx.effects.splice(0)) dispose()
 await act(async () => {
   root.render(null)
-  panelRoot.render(null)
 })
 await new Promise((resolve) => setTimeout(resolve, 30))
 
-check('dispose drops the main contribution', core.entriesOfSlot('main').some((e) => e.options.key === 'mcphub') === false)
-check('dispose drops the panel-menu contribution', core.entriesOfSlot('sidebar.panellist').length === 0,
-  String(core.entriesOfSlot('sidebar.panellist').length))
+check('dispose drops the detail-section contribution',
+  core.entriesOfSlot('plugins.detail.section').length === 0,
+  String(core.entriesOfSlot('plugins.detail.section').length))
 check('dispose removes injected style', document.getElementById('dsh-mcphub-style') === null)
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`)
