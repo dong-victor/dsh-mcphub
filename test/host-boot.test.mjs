@@ -5,10 +5,20 @@
  * The bridge itself starts asynchronously (never rejects), so this test does
  * not depend on MCPHub being reachable.
  *
- * Usage: node test/host-boot.test.mjs
+ * USAGE: node test/host-boot.test.mjs
  */
-import { apply, MCPHUB_GUIDANCE_BASE, MCPHUB_GUIDANCE_PROACTIVE, buildGuidance, publicToolName, groupToolsByServer, endpointOf } from '../lib/index.js'
-import { valueSchemaSpecToJsonSchema } from '@deepseek-ai/dsh-tools'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+// The plugin resolves its saved connection from $DSH_HOME when apply() runs,
+// so point the home at a throwaway directory before importing it: this test
+// asserts the DEFAULT connection and must never pick up whatever address the
+// developer has saved on this machine.
+process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-mcphub-boot-'))
+
+const { apply, MCPHUB_GUIDANCE_BASE, MCPHUB_GUIDANCE_PROACTIVE, buildGuidance, publicToolName, groupToolsByServer, endpointOf, DEFAULT_BASE_URL } = await import('../lib/index.js')
+const { valueSchemaSpecToJsonSchema } = await import('@deepseek-ai/dsh-tools')
 
 let failures = 0
 function check(name, condition, detail) {
@@ -57,8 +67,9 @@ try {
 }
 check('apply() completes without throwing', applyError === undefined, applyError?.message)
 
-check('status route registered', registered.routes.length === 1 && registered.routes[0].path === '/api/dsh-mcphub/status')
+check('status route registered', registered.routes.length === 2 && registered.routes[0].path === '/api/dsh-mcphub/status')
 check('route kind is exact', registered.routes[0]?.kind === 'exact')
+check('connection route registered', registered.routes[1]?.path === '/api/dsh-mcphub/connection' && registered.routes[1]?.kind === 'exact')
 
 const toolNames = registered.tools.map((t) => t.name)
 check('mcphub_status tool registered', toolNames.includes('mcphub_status'))
@@ -153,6 +164,10 @@ check('groupToolsByServer splits by shared prefix', groups.length === 2 &&
 
 check('endpointOf global', endpointOf('http://localhost:3000', '') === 'http://localhost:3000/mcp')
 check('endpointOf group', endpointOf('http://localhost:3000/', 'my-group') === 'http://localhost:3000/mcp/my-group')
+
+// The editable address still DEFAULTS to the local MCPHub: the saved override
+// is opt-in, so a machine that never saved one behaves exactly as before.
+check('default base URL is the local MCPHub', DEFAULT_BASE_URL === 'http://localhost:3000')
 
 // Disposal path: the effect disposer must run without throwing.
 for (const dispose of disposers.splice(0)) dispose()

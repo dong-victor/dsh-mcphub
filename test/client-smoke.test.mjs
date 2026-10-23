@@ -82,9 +82,49 @@ const fakeStatus = {
 }
 
 const fetchCalls = []
-window.fetch = async (url) => {
-  fetchCalls.push(String(url))
-  return { ok: true, json: async () => fakeStatus }
+/** Calls made to the connection route, in order: `{ method, body }`. */
+const connectionCalls = []
+/**
+ * Reply override for the connection route: `null` echoes the saved address as a
+ * connected status, a function receives the call and returns a fake response.
+ */
+let connectionResponse = null
+/**
+ * The address the fake host currently serves.
+ *
+ * The status route must report whatever the connection route last saved —
+ * otherwise a test would "pass" a reconnect whose result the status endpoint
+ * then contradicts, which is exactly the bug this suite exists to catch.
+ */
+let servedBaseUrl = fakeStatus.baseUrl
+/** Whether the fake host can currently reach the address it serves. */
+let servedConnected = true
+
+/** The status payload for the address currently being served. */
+function servedStatus(overrides) {
+  const status = servedConnected
+    ? { ...fakeStatus, baseUrl: servedBaseUrl, endpoint: `${servedBaseUrl}/mcp` }
+    : {
+      ...fakeStatus, baseUrl: servedBaseUrl, endpoint: `${servedBaseUrl}/mcp`,
+      connected: false, toolCount: 0, serverCount: 0, servers: [], error: '无法连接',
+    }
+  return overrides === undefined ? status : { ...status, ...overrides }
+}
+
+window.fetch = async (url, init) => {
+  const target = String(url)
+  const method = (init && init.method) || 'GET'
+  fetchCalls.push(method === 'GET' ? target : `${method} ${target}`)
+  if (target.indexOf('/api/dsh-mcphub/connection') !== -1) {
+    const body = init && init.body ? JSON.parse(init.body) : undefined
+    const call = { method, body }
+    connectionCalls.push(call)
+    if (connectionResponse !== null) return connectionResponse(call)
+    if (method === 'DELETE') servedBaseUrl = fakeStatus.baseUrl
+    else if (body && typeof body.baseUrl === 'string') servedBaseUrl = body.baseUrl
+    return { ok: true, json: async () => servedStatus({ source: 'saved' }) }
+  }
+  return { ok: true, json: async () => servedStatus() }
 }
 
 // React must resolve through the loader's `require`.
@@ -250,6 +290,95 @@ const toolRows = cards[0]?.querySelectorAll('.mh-toolRow') ?? []
 check('card lists every tool row', toolRows.length === 2, String(toolRows.length))
 check('tool row shows the DSH callable public name',
   (toolRows[0]?.textContent ?? '').includes('mcp__mcphub__cassiopeia-ap-mysql-execute_sql'))
+
+// --- the address is editable, and saving it reconnects ----------------------
+// The bridge is local by default, but the address is a deployment fact the
+// user owns. This block pins the whole edit->save->reconnect->repaint path,
+// because that is the only thing that makes the field more than decoration.
+
+const conn = host.querySelector('[data-mcphub-connection]')
+check('the address editor renders', conn !== null, host.innerHTML.slice(0, 120))
+
+const inputs = conn?.querySelectorAll('input') ?? []
+check('the editor has an address field and a group field', inputs.length === 2, String(inputs.length))
+
+const addressInput = inputs[0]
+const groupInput = inputs[1]
+check('the address field is prefilled from the host status', addressInput?.value === 'http://localhost:3000', addressInput?.value)
+check('the group field is prefilled from the host status', groupInput?.value === '')
+
+const buttons = conn?.querySelectorAll('button') ?? []
+const saveButton = buttons[0]
+const resetButton = buttons[1]
+check('the editor offers save and restore-default', buttons.length === 2, String(buttons.length))
+check('save is disabled until something changes', saveButton?.disabled === true)
+check('the reset control names the default in its tooltip',
+  (resetButton?.getAttribute('title') ?? '').includes('http://localhost:3000'), resetButton?.getAttribute('title'))
+
+/** Type into a field the way React's controlled input expects. */
+async function type(input, value) {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+  await act(async () => {
+    setter.call(input, value)
+    input.dispatchEvent(new window.Event('input', { bubbles: true }))
+  })
+}
+
+await type(addressInput, 'http://10.0.0.5:3000')
+check('editing the address enables save', saveButton?.disabled === false)
+check('an unsaved edit is announced', (conn?.textContent ?? '').includes('保存后生效'), conn?.textContent)
+
+await act(async () => {
+  conn.querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }))
+})
+await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+
+const saveCall = connectionCalls.find((call) => call.method === 'POST')
+check('saving posts the edited address to the connection route', saveCall?.body?.baseUrl === 'http://10.0.0.5:3000',
+  JSON.stringify(saveCall))
+check('saving carries the group field too', saveCall?.body?.group === '', JSON.stringify(saveCall?.body))
+check('the save result is reported as connected', (conn.textContent ?? '').includes('已连接到 http://10.0.0.5:3000'),
+  conn.textContent)
+check('a saved status repaints the endpoint', host.textContent.includes('http://10.0.0.5:3000/mcp'), '')
+check('the field follows the address the host now serves', addressInput.value === 'http://10.0.0.5:3000', addressInput.value)
+check('save is disabled again once the edit is applied', saveButton.disabled === true)
+
+// A refused address must be reported as an INPUT error, not as a connection
+// failure: the two need different fixes, so they must read differently.
+connectionResponse = () => ({ ok: false, json: async () => ({ ok: false, error: '地址不能为空' }) })
+await type(addressInput, '   ')
+await act(async () => {
+  conn.querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }))
+})
+await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+check('a rejected address is reported as invalid input', (conn.textContent ?? '').includes('地址无效'), conn.textContent)
+
+// An address that is valid but unreachable: saved, yet the bridge is down. The
+// form must say so instead of claiming success.
+connectionResponse = (call) => {
+  servedBaseUrl = call.body.baseUrl
+  servedConnected = false
+  return { ok: true, json: async () => servedStatus({ source: 'saved' }) }
+}
+await type(addressInput, 'http://127.0.0.1:1')
+await act(async () => {
+  conn.querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }))
+})
+await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+check('an unreachable address reports the failure', (conn.textContent ?? '').includes('连接 http://127.0.0.1:1 失败'),
+  conn.textContent)
+
+// Restore default clears the override and reconnects to the local hub.
+connectionResponse = null
+servedConnected = true
+await act(async () => {
+  resetButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
+})
+await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+check('restore-default calls the connection route with DELETE',
+  connectionCalls.some((call) => call.method === 'DELETE'), JSON.stringify(connectionCalls.map((c) => c.method)))
+check('restore-default returns the field to the local default', addressInput.value === 'http://localhost:3000',
+  addressInput.value)
 
 // --- render the section for OTHER subjects (must draw nothing) ---------------
 // The page renders every registered section entry with the subject of
