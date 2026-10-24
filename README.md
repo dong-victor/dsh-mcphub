@@ -21,9 +21,11 @@ mcp__mcphub__<server名>-<工具名>
   - 槽位契约要求每个注册项自行判断「当前打开的是哪个插件的详情页」，对不属于自己的 subject 返回 `null`；本插件只匹配 `{ kind: 'bundle', pkg: { name: '@dong-victor/dsh-mcphub' } }`，包内某个 row 的详情页（`kind: 'row'`）不重复渲染。
 - **地址可编辑 + 动态重连**：默认连本地 `http://localhost:3000`，地址与分组在详情页直接改。保存后写入 `~/.dsh/dsh-mcphub/config.json`（原子写，重启 dsh 仍生效）并**立即重连**，无需重启宿主；「恢复默认」清除保存值回到本地默认。地址只保留 origin（`/mcp` 前缀自动丢弃，端点始终是 `${origin}/mcp[/<group>]`），支持 `localhost:3000`、`127.0.0.1:3001`、完整 `http(s)://` 写法。连不上时地址照样保存、区块如实报错，方便改掉打错的地址。
 - **健壮性**：断线自动指数退避重连（工具在中断期保持注册、调用报错，恢复后自动重同步）；监听 `notifications/tools/list_changed` 热同步工具集；MCPHub 不可达时插件照常激活，详情页区块如实显示；换地址后旧 hub 的工具立即注销，不会残留指向已弃用 hub 的工具。
-- **宿主路由**（均环回地址保护）：
+- **宿主路由**（与 dsh `/api` 网关同一条信任线：环回地址 + 部署声明的 `trustedHosts`，并校验 `sec-fetch-site` / `Origin` 同源）：
   - `GET /api/dsh-mcphub/status`（TTL 缓存、`?refresh=1` 绕过）；
   - `/api/dsh-mcphub/connection`：`GET` 读当前生效地址与默认值，`POST { baseUrl, group }` 保存并重连，`DELETE` 清除保存值回到默认。
+
+  这条信任线**故意不比宿主更严**：早期版本只认环回 `Host`，于是经 dsh-pocket / 局域网地址 / 机器名打开的页面能正常用 `/api` 的其余部分，却会被这两条路由回 `403 forbidden`，详情页既读不到状态也存不下地址。判据从 `connection` 服务惰性读取，顺序是「`requestRejection`（网关的完整判定，含 Host/Origin 栅栏与浏览器认证）→ `trustedHosts` → 只认环回」；`trustedHosts` 故意排在后面，因为它只列受信权威、不表达会话状态，抢先采用就会让未认证调用方进到网关本来就拦的路由。拒绝状态码也会原样透出：`401` 表示需要重新认证，`403` 表示来源不受信，两者修法不同。
 
 ## 安装
 
@@ -69,11 +71,11 @@ npm pack           # 打包发布
 
 测试说明：
 
-- `connection.test.mjs` 覆盖地址编辑这条链路：地址归一化（裸 `host:port`、带 `/mcp` 后缀、带分组路径）、`~/.dsh/dsh-mcphub/config.json` 的读写与原子写、优先级（保存值 > profile > 默认）、损坏文件降级、以及 `/api/dsh-mcphub/connection` 的 GET / POST / DELETE / 非环回 403 / 非法地址 400 / 不可达地址仍保存。
-- `client-smoke.test.mjs` 用**真实** `SlotCore`（`@deepseek-ai/dsh-client-ui-slots`）驱动 `apply()`，断言槽位占位成功、区块渲染、对非本插件 subject 返回 `null`、dispose 回收——槽位未声明时注册会抛错，因此通过即证明插件对准了宿主的槽位契约；同时驱动地址表单的编辑 → 保存 → 重连 → 重绘，以及「恢复默认」。
+- `connection.test.mjs` 覆盖地址编辑这条链路：地址归一化（裸 `host:port`、带 `/mcp` 后缀、带分组路径）、`~/.dsh/dsh-mcphub/config.json` 的读写与原子写、优先级（保存值 > profile > 默认）、损坏文件降级，以及 `/api/dsh-mcphub/connection` 的 GET / POST / DELETE / 非法地址 400 / 不可达地址仍保存。信任线单独成组：四种环回写法放行，未知 `Host`、`sec-fetch-site: cross-site`、异源 `Origin` 一律 403；`trustedHosts` 里的 LAN IP（无端口写法）与机器名（带端口写法）放行、同名换端口拒绝；接上 `requestRejection` 时以它为准（受信权威但无会话照样被拒，其 401 原样透出），判定抛错则 fail closed。
+- `client-smoke.test.mjs` 用**真实** `SlotCore`（`@deepseek-ai/dsh-client-ui-slots`）驱动 `apply()`，断言槽位占位成功、区块渲染、对非本插件 subject 返回 `null`、dispose 回收——槽位未声明时注册会抛错，因此通过即证明插件对准了宿主的槽位契约；同时驱动地址表单的编辑 → 保存 → 重连 → 重绘，以及「恢复默认」。另断言被拒绝时的**文案分流**：`401 / 403 / 404` 的裸文本响应分别翻成「会话未通过认证 / 宿主拒绝了这次请求 / 宿主端还没有这个接口」，不会被误报成「地址无效」，其它状态码仍带上状态码，真实传输失败仍是「状态查询失败」。
 - `entry-layout.test.mjs` 以插件管理页的真实契约（`plugins.detail.section` 为 list、每个注册项拿到当前详情页的 subject）驱动同一套真实 `SlotCore`，并**故意声明**已废弃的 `sidebar.panellist` / `main` / `sidebar.footer.action` 三个槽位，用来正面证明插件不再注册进它们（而不是因为槽位未声明才「恰好」没注册）。
 - `bridge-live.test.mjs` 会真实连接本机 `http://localhost:3000` 的 MCPHub，发现工具并调用一个只读工具（如 `get_schema_info`），需要 MCPHub 在线。
-- `connection-live.test.mjs` 把两条路由挂到真实 `node:http` 服务器上跑真实请求：证明环回保护读的是真实 `remoteAddress` / `Host`（含用 `http.request` 伪造非环回 `Host` 得 403）、请求体能从真实 `data`/`end` 事件拼出、保存后桥接真的重连且保住工具集。需要本机 MCPHub 在线。
+- `connection-live.test.mjs` 把两条路由挂到真实 `node:http` 服务器上跑真实请求：证明栅栏读的是真实 `Host`（用 `http.request` 伪造非环回 `Host` 得 403，环回 `Host` 正对照 200）、请求体能从真实 `data`/`end` 事件拼出、保存后桥接真的重连且保住工具集；再接上真实 `connection` 服务，证明判定确实被查询、LAN 权威放行、未认证判定以 401 透出。需要本机 MCPHub 在线。
 
 ## 兼容性
 面向 **dsh 0.2.0-rc.2**。该版本有两处破坏性变更，本插件已相应改造：
@@ -92,6 +94,8 @@ npm pack           # 打包发布
 - 依赖 MCPHub 服务在线；服务端会话在插件重连后会重建。
 - 地址编辑只影响本插件自己的 `baseUrl` / `group`：`headers`、`toolCallTimeoutMs`、`reconnect` 等仍在 profile 配置里改。若 MCPHub 开启了 bearer 认证，换地址后仍需在 profile 配 `headers`。
 - 地址按 origin 保存：`http(s)://host[:port]`，路径部分会被丢弃（端点固定为 `${origin}/mcp[/<group>]`），这是 MCPHub 的路由契约。
+- 界面文案区分三类失败，但插件不自行绕过宿主的访问控制：`401` 需要重新认证、`403` 需要把页面来源加进宿主的 `trustedHosts`、`404` 说明当前运行的宿主进程还没加载本插件的宿主端（重启 dsh web 即可）。
+- 改了 `lib/client.js` 后必须重启 dsh web：浏览器 bundle 在宿主组装时一次性生成并缓存在内存里，只替换文件不会换掉已发出的 bundle。
 
 ## 许可
 

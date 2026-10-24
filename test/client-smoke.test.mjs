@@ -368,6 +368,32 @@ await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
 check('an unreachable address reports the failure', (conn.textContent ?? '').includes('连接 http://127.0.0.1:1 失败'),
   conn.textContent)
 
+// A bare-text rejection from dsh's own `/api` gate (`401 unauthorized`,
+// `403 forbidden`) or an unmounted route (`404`) has no JSON error to quote.
+// Echoing the raw word as "invalid address" would blame the field the user
+// typed for a problem that lives in the session, the origin, or the running
+// Host — so each status must name its own cause instead.
+const bareRejections = [
+  [401, '会话未通过认证'],
+  [403, '拒绝了这次请求'],
+  [404, '还没有这个接口'],
+]
+for (const [status, expected] of bareRejections) {
+  connectionResponse = () => ({
+    ok: false,
+    status,
+    json: async () => { throw new SyntaxError('Unexpected token') },
+  })
+  await type(addressInput, 'http://10.0.0.6:3000')
+  await act(async () => {
+    conn.querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }))
+  })
+  await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+  const text = conn.textContent ?? ''
+  check(`a bare ${status} is explained, not blamed on the address`, text.includes(expected), text)
+  check(`the bare ${status} message is not an "invalid address" report`, !text.includes('地址无效'), text)
+}
+
 // Restore default clears the override and reconnects to the local hub.
 connectionResponse = null
 servedConnected = true
@@ -423,6 +449,36 @@ await act(async () => { refreshButton.dispatchEvent(new window.MouseEvent('click
 await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
 const banner = host.querySelector('.mh-banner')
 check('error banner visible on failure', banner !== null && banner.textContent.includes('状态查询失败'), banner?.textContent)
+
+// dsh's own `/api` gate answers this route with a bare-text body
+// (`401 unauthorized` / `403 forbidden`), which `response.json()` cannot parse.
+// The banner must translate the STATUS into an instruction instead of showing
+// the raw word — "状态查询失败：forbidden" tells the user nothing to do.
+for (const [status, expected] of [[401, '会话未通过认证'], [403, '拒绝了这次请求'], [404, '还没有这个接口']]) {
+  window.fetch = async () => ({ ok: false, status, json: async () => { throw new SyntaxError('Unexpected token') } })
+  await act(async () => { refreshButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true })) })
+  await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+  const text = host.querySelector('.mh-banner')?.textContent ?? ''
+  check(`a bare status-route ${status} becomes an instruction`, text.includes(expected), text)
+  check(`the bare ${status} banner quotes no raw body word`,
+    !/forbidden|unauthorized|not found/.test(text), text)
+}
+
+// An unexpected status still reports its code rather than a placeholder.
+window.fetch = async () => ({ ok: false, status: 502, json: async () => { throw new SyntaxError('Unexpected token') } })
+await act(async () => { refreshButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true })) })
+await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+check('an unlisted status reports its code',
+  (host.querySelector('.mh-banner')?.textContent ?? '').includes('502'),
+  host.querySelector('.mh-banner')?.textContent)
+
+// A real transport failure keeps the historical wording.
+window.fetch = async () => { throw new TypeError('Failed to fetch') }
+await act(async () => { refreshButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true })) })
+await act(async () => { await new Promise((r) => setTimeout(r, 80)) })
+check('a transport failure still reads as a failed status query',
+  (host.querySelector('.mh-banner')?.textContent ?? '').includes('状态查询失败'),
+  host.querySelector('.mh-banner')?.textContent)
 
 // --- disposal ----------------------------------------------------------------
 

@@ -139,6 +139,8 @@ check('an unparseable configured address falls back to the default', junk.baseUr
 // --- the connection route ---------------------------------------------------
 
 const registered = { routes: [], tools: [], sections: [], effects: [] }
+// The fence reads the connection service lazily, so a test can swap it in.
+let connectionService = undefined
 const ctx = {
   webServer: {
     register(route) {
@@ -152,7 +154,7 @@ const ctx = {
     registered.effects.push(fn())
     return () => {}
   },
-  get: () => undefined,
+  get: (name) => (name === 'connection' ? connectionService : undefined),
 }
 
 apply(ctx, {})
@@ -164,14 +166,19 @@ const connectionRoute = registered.routes.find((route) => route.path === '/api/d
 check('the connection route is registered', connectionRoute !== undefined)
 check('the connection route is an exact path', connectionRoute?.kind === 'exact')
 
-/** Build a fake loopback request carrying an optional JSON body. */
-function fakeRequest(method, body, { loopback = true } = {}) {
+/**
+ * Build a fake request carrying an optional JSON body.
+ *
+ * The fence is a Host-header + browser-marker rule (the same one the dsh `/api`
+ * gateway applies), so the socket address is deliberately irrelevant here.
+ */
+function fakeRequest(method, body, { host = '127.0.0.1:3080', headers = {} } = {}) {
   const listeners = {}
   const request = {
     method,
     url: '/api/dsh-mcphub/connection',
-    headers: { host: '127.0.0.1:3080' },
-    socket: { remoteAddress: loopback ? '127.0.0.1' : '10.1.2.3' },
+    headers: { host, ...headers },
+    socket: { remoteAddress: '127.0.0.1' },
     on(event, handler) {
       listeners[event] = handler
       return request
@@ -208,11 +215,92 @@ async function call(route, method, body, options) {
   return response
 }
 
-// A non-loopback caller must never be able to repoint the bridge.
+// --- the fence --------------------------------------------------------------
+//
+// The plugin routes must draw the SAME trust line as the dsh `/api` gateway:
+// loopback plus every authority the deployment declares in `connection
+// .trustedHosts`. A stricter rule made the panel answer `forbidden` for any
+// page opened over the LAN while the rest of `/api` worked.
+
+// An unknown Host must never be able to repoint the bridge.
 {
-  const response = await call(connectionRoute, 'POST', { baseUrl: 'http://evil.example.com' }, { loopback: false })
-  check('a non-loopback caller is refused', response.status === 403, String(response.status))
+  const response = await call(connectionRoute, 'POST', { baseUrl: 'http://evil.example.com' }, { host: 'evil.example.com' })
+  check('an unknown Host is refused', response.status === 403, String(response.status))
   check('a refused caller changes nothing', readSettings(settingsPath).baseUrl !== 'http://evil.example.com')
+}
+
+// Every loopback spelling the browser can legitimately send stays accepted.
+for (const host of ['127.0.0.1:3080', 'localhost:3080', '127.0.0.5:3080', '[::1]:3080']) {
+  const response = await call(connectionRoute, 'GET', undefined, { host })
+  check(`loopback Host ${host} is accepted`, response.status === 200, String(response.status))
+}
+
+// Browser markers still gate the write path.
+{
+  const crossSite = await call(connectionRoute, 'GET', undefined, { headers: { 'sec-fetch-site': 'cross-site' } })
+  check('a cross-site request is refused', crossSite.status === 403, String(crossSite.status))
+  const foreignOrigin = await call(connectionRoute, 'GET', undefined, { headers: { origin: 'http://evil.example.com' } })
+  check('a foreign Origin is refused', foreignOrigin.status === 403, String(foreignOrigin.status))
+  const sameOrigin = await call(connectionRoute, 'GET', undefined, { headers: { origin: 'http://127.0.0.1:3080' } })
+  check('a matching Origin is accepted', sameOrigin.status === 200, String(sameOrigin.status))
+}
+
+// A deployment that serves the page over the LAN declares its authorities here;
+// those must pass exactly like loopback, otherwise this route is the only part
+// of `/api` that breaks for a remote browser.
+connectionService = { trustedHosts: ['192.168.1.9', 'dougz:3081'] }
+{
+  const byIp = await call(connectionRoute, 'GET', undefined, { host: '192.168.1.9:3081' })
+  check('a trusted LAN IP is accepted (port-less entry)', byIp.status === 200, String(byIp.status))
+  const byName = await call(connectionRoute, 'GET', undefined, { host: 'dougz:3081' })
+  check('a trusted machine name is accepted (exact entry)', byName.status === 200, String(byName.status))
+  const wrongPort = await call(connectionRoute, 'GET', undefined, { host: 'dougz:3082' })
+  check('a trusted name on another port is refused', wrongPort.status === 403, String(wrongPort.status))
+  const untrusted = await call(connectionRoute, 'GET', undefined, { host: 'evil.example.com' })
+  check('an untrusted Host is still refused', untrusted.status === 403, String(untrusted.status))
+}
+
+// The gateway's own verdict is the STRONGER statement — it carries browser
+// authentication as well as the authority fence — so it must win, and the
+// authorities list must never be consulted in its place.
+connectionService = {
+  trustedHosts: ['dougz:3081'],
+  requestRejection: (request) => (request.headers.host === 'dougz:3081' ? undefined : 403),
+}
+{
+  const accepted = await call(connectionRoute, 'GET', undefined, { host: 'dougz:3081' })
+  check('the gateway verdict admits a request it trusts', accepted.status === 200, String(accepted.status))
+  const rejected = await call(connectionRoute, 'GET', undefined, { host: 'evil.example.com' })
+  check('the gateway verdict rejects a request it does not', rejected.status === 403, String(rejected.status))
+  // An authority listed as trusted but REFUSED by the verdict (e.g. an expired
+  // browser session) must stay refused: consulting the list first would answer
+  // a request the gateway itself rejects. The verdict's own status travels out,
+  // because "sign in again" (401) and "origin not trusted" (403) are different
+  // fixes and the browser has to tell them apart.
+  connectionService = {
+    trustedHosts: ['dougz:3081'],
+    requestRejection: () => 401,
+  }
+  const unauthenticated = await call(connectionRoute, 'GET', undefined, { host: 'dougz:3081' })
+  check('a trusted authority without a session is still refused', unauthenticated.status === 401, String(unauthenticated.status))
+  check('the refusal body names the authentication failure', unauthenticated.body?.error === 'unauthorized',
+    JSON.stringify(unauthenticated.body))
+}
+
+// A thrown verdict must fail closed, not open.
+connectionService = { requestRejection: () => { throw new Error('boom') } }
+{
+  const response = await call(connectionRoute, 'GET', undefined, { host: '127.0.0.1:3080' })
+  check('a throwing gateway verdict fails closed', response.status === 403, String(response.status))
+}
+
+// No connection service at all (older composition): loopback-only fallback.
+connectionService = undefined
+{
+  const response = await call(connectionRoute, 'GET', undefined, { host: '127.0.0.1:3080' })
+  check('without a connection service loopback still works', response.status === 200, String(response.status))
+  const foreign = await call(connectionRoute, 'GET', undefined, { host: 'dougz:3081' })
+  check('without a connection service a remote Host is refused', foreign.status === 403, String(foreign.status))
 }
 
 // An unusable body must be reported as an input error, not as a connection failure.

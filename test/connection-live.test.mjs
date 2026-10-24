@@ -30,6 +30,8 @@ function check(name, condition, detail) {
 // --- mount the plugin's routes on a real server -----------------------------
 
 const routes = new Map()
+/** The live `connection` service the fence reads; undefined = loopback-only. */
+let connectionService = undefined
 const ctx = {
   webServer: {
     register(route) {
@@ -44,7 +46,7 @@ const ctx = {
     process.on('exit', () => dispose())
     return () => {}
   },
-  get: () => undefined,
+  get: (name) => (name === 'connection' ? connectionService : undefined),
 }
 
 apply(ctx, {})
@@ -214,6 +216,49 @@ const sameOrigin = await rawCall({
   body: JSON.stringify({ baseUrl: 'http://localhost:3000', group: '' }),
 })
 check('a loopback Host header is still accepted', sameOrigin.status === 200, String(sameOrigin.status))
+
+// --- the same fence, wired to a live connection service ---------------------
+// Production reads the trust line from the `connection` service, so the same
+// two raw requests must be answered through that path as well — otherwise the
+// route could pass above (loopback fallback) and still break on the LAN.
+
+const LAN_IP = '192.168.1.9'
+let sawRejectionArguments = 0
+connectionService = {
+  // The gateway's real contract: undefined when admitted, a status otherwise.
+  requestRejection(request) {
+    sawRejectionArguments += 1
+    if (request.headers.host === `evil.example.com`) return 403
+    return undefined
+  },
+  trustedHosts: [`${LAN_IP}`],
+}
+
+const gatewayRefused = await rawCall({
+  method: 'POST',
+  path: '/api/dsh-mcphub/connection',
+  host: 'evil.example.com',
+  body: JSON.stringify({ baseUrl: 'http://evil.example.com:3000' }),
+})
+check('the live gateway verdict refuses an untrusted Host', gatewayRefused.status === 403, String(gatewayRefused.status))
+check('the fence actually consulted the live service', sawRejectionArguments > 0, String(sawRejectionArguments))
+
+const socketPeer = await rawCall({
+  method: 'GET',
+  path: '/api/dsh-mcphub/status',
+  host: `${LAN_IP}:${port}`,
+})
+check('a gateway-admitted LAN authority is served', socketPeer.status === 200, String(socketPeer.status))
+
+// The verdict is authoritative even when it disagrees with the raw HTTP facts:
+// it carries browser authentication, which the socket cannot show.
+connectionService = { requestRejection: () => 401 }
+const unauthenticated = await rawCall({ method: 'GET', path: '/api/dsh-mcphub/connection', host: `127.0.0.1:${port}` })
+check('an unauthenticated verdict travels out as 401', unauthenticated.status === 401, String(unauthenticated.status))
+check('the 401 body says unauthorized', JSON.stringify(unauthenticated.body).includes('unauthorized'), JSON.stringify(unauthenticated.body))
+
+// Back to a loopback-only composition for the remaining assertions.
+connectionService = undefined
 
 // Restore the default so this verification leaves no saved override behind.
 await call('/api/dsh-mcphub/connection', { method: 'DELETE' })
